@@ -6,7 +6,7 @@ Something about Windows Kernel
 
 very easy, which can help you understand the kernel of the windows.
 
-But, the defect that it is running in the xp system. :)-
+But, it is the defect that it is running in the xp system. :)-
 
 [Record](https://github.com/m1keya/Windows-Kernel/blob/main/Kernel%20Lab/kernel%20lab.md)
 
