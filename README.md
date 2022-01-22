@@ -2,7 +2,7 @@
 
 Something about Windows Kernel
 
-## Lab
+## Kernel Lab
 
 very easy, which can help you understand the kernel of the windows.
 
