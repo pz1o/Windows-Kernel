@@ -1276,7 +1276,8 @@ Hello m1keya!
 
 ## 1. goal
 
-
+1. 熟悉inline hook
+2. 掌握jmp和pop的hook
 
 ## 2. step
 
@@ -2119,17 +2120,389 @@ void main()
 
 ![image-20220122173758244](kernel%20lab/image-20220122173758244.png)
 
+# 0x06 lab 06
+
+## 1. goal
+
+1. 通过结合之前的自己实现系统调用
+2. 从三环直接调用不通过零环
+
+## 2. step
+
+先画一个图，说明一下我们需要干的事
+
+我们得先明确应该有3个东西是需要我们构造的
+
+1. **系统调用入口，用来处理参数，通过服务表进入真正的函数**
+2. **我们自己构造的函数**
+3. **系统服务表，每个表项对应一个系统调用**
+
+![image-20220122210124849](kernel%20lab/image-20220122210124849.png)
+
+先写第一个程序，让我们构造好内核空间
+
+同时伪造好服务表，系统调用入口，我们伪造函数。
+
+**kernelcode.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+
+DWORD Target[3] = { 0x8003f180, 0x8003f220, 0x8003f250 };
+int i;
+int flag;
+char* p;
+void ReadMem();
+void AllocMem();
+void SystemCallEntry();
+DWORD* ServiceTable = (DWORD*)0x8003f2a0;
+//0x00401040
+void __declspec(naked) idtEntry()
+{
+	p = (char*)Target[0];
+	for (i = 0; i < 0x80; i++) {
+		*p = ((char *)SystemCallEntry)[i];
+		p++;
+	}
+	p = (char*)Target[1];
+	for (i = 0; i < 0x30; i++) {
+		*p = ((char*)ReadMem)[i];
+		p++;
+	}
+	p = (char*)Target[2];
+	for (i = 0; i < 0x30; i++) {
+		*p = ((char*)AllocMem)[i];
+		p++;
+	}
+	ServiceTable[0] = Target[1];
+	ServiceTable[1] = Target[2];
+	//eq 8003f500 8003ee00`0008f180
+	__asm {
+		mov eax, 0x0008f180
+		mov ds:[0x8003f508], eax
+		mov eax, 0x8003ee00
+		mov ds : [0x8003f508+4] , eax
+		iretd
+	}
+
+
+}
+//0x8003f330
+/*
+eip
+cs
+eflags
+esp
+ss
+*/
+void __declspec(naked) SystemCallEntry()
+{
+	__asm {
+		push 0x30
+		pop fs
+		sti
+
+		mov ebx, ss:[esp + 0xc]
+		mov ecx, ds:[ebx + 0x4]
+		push 0x8003f2a0
+		pop ebx
+		mov ebx, ds:[ebx + eax*4]
+		call ebx
+
+		cli
+		push 0x3b
+		pop fs
+		iretd
+	}
+}
+
+void __declspec(naked) ReadMem()
+{
+	__asm {
+		mov eax, ds:[ecx]
+		ret
+	}
+}
+//0x8053474A
+//ExAllocatePool(NonPaged, 0x400)
+void __declspec(naked) AllocMem()
+{
+	__asm {
+		push ecx
+		push 0
+		mov eax, 0x8053474A
+		call eax
+		ret
+	}
+}
+//eq 8003f500 0040ee00`00081040
+void go()
+{
+	__asm int 0x20;
+
+}
+
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	go();
+	//printf("[+] The ptr is:%p\n", g_pool);
+	system("pause");
+}
+```
+
+接下来用我们的三环调用程序
+
+**ntdll.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+
+
+DWORD ReadMem(DWORD addr);
+DWORD AllocMem(DWORD size);
+DWORD __declspec(naked) ReadMem(DWORD addr) {
+	__asm {
+		mov eax, 0
+		int 0x21
+		ret
+	}
+}
+DWORD __declspec(naked) AllocMem(DWORD size) {
+	__asm {
+		mov eax,1 
+		int 0x21
+		ret
+	}
+}
+void main()
+{
+	printf("[+] The Addr's content is: 0x%p\n", ReadMem(0x8003f500));
+	printf("[+] The Heap allocated is at: 0x%p\n", AllocMem(1024));
+	system("pause");
+}
+```
+
+![image-20220122220327598](kernel%20lab/image-20220122220327598.png)
+
+好家伙自己写了快半个小时，下一个。
+
+# 0x07 lab 07
+
+## 1. goal
 
 
 
 
 
+## 2. step
+
+段保护 主要体现在 段选择子上；但是数据段、代码段、栈段等采用的都是4GB平坦模式，段的特征并没有那样展现。所以具体的**保护机制 采用的是页保护。**
+
+非PAE可以进行数据执行
+
+查看一下物理内存
+
+其实开机启动的时候是可以看见的
+
+```
+kd> g
+Enter DriverEntry(82E1E910,800939E8)
+Required extension size: max: 10748124 Min: 63344
+Physical Address: 1000     Length: 9e000 
+Physical Address: 100000     Length: eff000 
+Physical Address: 1000000     Length: 1eee0000 
+Physical Address: 1ff00000     Length: 100000 
+Total Physical Memory: 536334336 (1ff7d000)
+Modified-> Physical Memory Pages: 130941 (1ff7d)
+kd> !dd 1fffff70 
+#1fffff70 fffffffe 00271eb8 6cb3e800 10c20000
+#1fffff80 cccccc00 086acccc 4e9a5868 6c5ae8f8
+#1fffff90 758b0000 39c93308 0575104e 74144e39
+#1fffffa0 0c4d3949 468b4474 10453b04 4d893c72
+#1fffffb0 147d80fc 6a0c7501 76ff5001 1c15ff10
+#1fffffc0 fff84e93 75ff1075 1076ff0c ffff0de8
+#1fffffd0 fc45c7ff fffffffe 13ebc033 c340c033
+#1fffffe0 c7e8658b fffefc45 1eb8ffff e8000027
+```
+
+我们现在要看物理虚拟地址转换，其中最重要的就是cr3寄存器。
+
+我们先来读一下
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
 
 
+DWORD g_cr3;
+//0x00401040
+void __declspec(naked) idtEntry()
+{
+	__asm {
+		mov eax, cr3
+		mov g_cr3, eax
+		iretd
+	}
+	
+	
 
+}
+//0x8003f330
 
+void go()
+{
+	__asm int 0x20;
 
+}
 
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	go();
+	printf("[+] The cr3 is: 0x%p\n", g_cr3);
+
+	//printf("[+] The ptr is:%p\n", g_pool);
+	system("pause");
+}
+```
+
+```
+Failed to get VadRoot
+PROCESS 82c98020  SessionId: 0  Cid: 03d0    Peb: 7ffda000  ParentCid: 05f4
+    DirBase: 1735e000  ObjectTable: e2705320  HandleCount:  15.
+    Image: kernel lab1.exe
+```
+
+![image-20220122225338007](kernel%20lab/image-20220122225338007.png)
+
+启动dirbase就是cr3寄存器中内容，就是物理地址。
+
+那么如何从虚拟地址推出物理地址呢？
+
+```
+kd> .formats 0x403018
+Evaluate expression:
+  Hex:     00403018
+  Decimal: 4206616
+  Octal:   00020030030
+  Binary:  00000000 01000000 00110000 00011000
+  Chars:   .@0.
+  Time:    Thu Feb 19 00:30:16 1970
+  Float:   low 5.89472e-039 high 0
+  Double:  2.07834e-317
+
+101012分页
+00000000 01	<- 1 	pdi (Page Directory Index)
+000000 0011	<- 3	pti
+0000 00011000	<-18	offset
+
+kd> !dd 1735e000 
+#1735e000 172b5067 17342067 00000000 00000000
+
+067是属性
+17342000是基址
+
+kd> !dd 17342000+3*4
+#1734200c 173b4067 172b4025 00000000 00000000
+#1734201c 00000000 00000000 00000000 00000000
+#1734202c 00000000 00000000 00000000 00000000
+#1734203c 00000000 1018f025 1722d025 fffff440
+#1734204c fffff440 1292e025 1290f025 129a0025
+#1734205c 17321025 12b12025 173b3025 101a3025
+#1734206c 17304025 17305025 17346025 17307025
+#1734207c 172f8025 17339025 1645a025 fffff440
+
+067是属性
+173b4000是基址
+
+kd> !dd 173b4000+18
+#173b4018 12345678 00000000 00000000 00000000
+#173b4028 00000000 00000000 00000000 00000000
+#173b4038 00000000 00000000 00000000 00000000
+#173b4048 00000000 00000000 00000000 00000000
+#173b4058 00000000 00000000 00000000 00000000
+#173b4068 00000000 00000000 00000000 00000000
+#173b4078 00000000 00000000 00000000 00000000
+#173b4088 00000000 00000000 00000000 00000000
+```
+
+如下图
+
+![image-20220122231008662](kernel%20lab/image-20220122231008662.png)
+
+windbg有现成命令
+
+```
+kd> !vtop 1735e 403018
+X86VtoP: Virt 0000000000403018, pagedir 000000001735e000
+X86VtoP: PDE 000000001735e004 - 17342067
+X86VtoP: PTE 000000001734200c - 173b4067
+X86VtoP: Mapped phys 00000000173b4018
+Virtual address 403018 translates to physical address 173b4018.
+```
+
+如果想直接读虚拟内存，可以挂载进程
+
+```
+kd> .process 82c98020
+ReadVirtual: 82c98038 not properly sign extended
+Implicit process is now 82c98020
+WARNING: .cache forcedecodeuser is not enabled
+kd> dd 0x403018
+00403018  12345678 00000000 00000000 00000000
+00403028  00000000 00000000 00000000 00000000
+00403038  00000000 00000000 00000000 00000000
+```
+
+进程空间如图
+
+![image-20220123000006318](kernel%20lab/image-20220123000006318.png)
+
+那么我们能否通过进程空间找到我们的PTE表项，从而修改页面属性，当然是可以
+
+```
+kd> !pte 403018
+                 VA 00403018
+PDE at C0300004         PTE at C000100C
+contains 00000000
+contains 0000000000000000
+not valid
+kd> ?? ((0x00403018 >> 12)<<2) + 0xc0000000
+unsigned int 0xc000100c
+kd> dq C000100C
+ReadVirtual: c000100c not properly sign extended
+c000100c  172b4025`173b4067 00000000`00000000
+```
+
+我这的环境可能有点问题
+
+具体修改属性可以通过
+
+```
+.hh !pte
+```
+
+查看
+
+我们也得到了公式
+
+```
+virtual address of pte = ((virtuall address >> 12) <<2) + 0xc0000000
+```
+
+![image-20220123002317864](kernel%20lab/image-20220123002317864.png)
 
 # some question
 
@@ -2150,14 +2523,17 @@ void main()
 sti
 //关中断
 cli
+
 //加载gdt寄存器
 LGDT
 //读取tr寄存器
 str ax
+
 //压入eflags寄存器
 pushfd
 //压入通用寄存器
 pushad
+
 //test
 test eax, eax
 jnz L
@@ -2174,4 +2550,20 @@ e9 jmp
 68 push 32bit
 c3 ret
 ```
+
+## inline hook
+
+```
+pop addr
+ret
+
+mov eax,addr
+call eax
+```
+
+## syscall
+
+1. 注意三环和零环哪里切换，要注意ret和iretd
+2. 注意内平栈和外平栈
+3. 知道如何用esp来定位参数
 
