@@ -2298,13 +2298,14 @@ void main()
 
 ## 1. goal
 
-
-
-
+1. 熟悉PAE分页和非PAE分页
+2. 对虚拟地址和物理地址熟练转换
 
 ## 2. step
 
-段保护 主要体现在 段选择子上；但是数据段、代码段、栈段等采用的都是4GB平坦模式，段的特征并没有那样展现。所以具体的**保护机制 采用的是页保护。**
+### 非PAE分页
+
+段保护 主要体现在 段选择子上；但是数据段、代码段、栈段等采用的都是4KB平坦模式，段的特征并没有那样展现。所以具体的**保护机制 采用的是页保护。**
 
 非PAE可以进行数据执行
 
@@ -2440,7 +2441,7 @@ kd> !dd 173b4000+18
 
 如下图
 
-![image-20220122231008662](kernel%20lab/image-20220122231008662.png)
+![image-20220126162910960](kernel%20lab/image-20220126162910960.png)
 
 windbg有现成命令
 
@@ -2466,7 +2467,7 @@ kd> dd 0x403018
 00403038  00000000 00000000 00000000 00000000
 ```
 
-进程空间如图
+进程空间如图，每一个进程空间有1024个PTE表项，1个PDE表项
 
 ![image-20220123000006318](kernel%20lab/image-20220123000006318.png)
 
@@ -2503,6 +2504,2195 @@ virtual address of pte = ((virtuall address >> 12) <<2) + 0xc0000000
 ```
 
 ![image-20220123002317864](kernel%20lab/image-20220123002317864.png)
+
+上面看到我们可以修改属性
+
+----
+
+### PAE分页
+
+PAE分页会开启数据执行保护。
+
+具体实现方法看下面
+
+![image-20220126221831316](kernel%20lab/image-20220126221831316.png)
+
+先看cr3寄存器
+
+
+
+```
+kd> .formats 403018
+Evaluate expression:
+  Hex:     00403018
+  Decimal: 4206616
+  Octal:   00020030030
+  Binary:  00000000 01000000 00110000 00011000
+  Chars:   .@0.
+  Time:    Thu Feb 19 00:30:16 1970
+  Float:   low 5.89472e-039 high 0
+  Double:  2.07834e-317
+```
+
+**这里采用29912分页**
+
+>为什么采用29912分页？
+>
+>12：物理页的大小为4KB，4096字节。想要索引到每一个字节需要12个二进制位。因为2的12次方等于4096。所以是12
+>9：由于PTE增加到36位，原先能保存1024个PTE成员的PTT表，现在只能保存512个PTE了。想要索引到512个成员需要9个二进制位。2的9次方等于512。
+>9：PDE跟随PTE由原来的4个字节变成了8个字节。数据项也由1024变成了512。
+>2：PDPTE的成员有4个，正好用两个二进制位索引。
+
+```
+00				0
+000000 010		2
+00000 0011		3
+0000 00011000		18
+//物理地址
+kd> !dq 096101a0
+# 96101a0 00000000`14011001 00000000`14022001
+# 96101b0 00000000`13fc3001 00000000`14090001
+# 96101c0 00000000`11111001 00000000`11122001
+# 96101d0 00000000`11123001 00000000`111b0001
+# 96101e0 00000000`11f63001 00000000`11f44001
+# 96101f0 00000000`11f25001 00000000`11f72001
+# 9610200 00000000`1202c001 00000000`1201d001
+# 9610210 00000000`1202e001 00000000`1207b001
+//PDE
+kd> !dq 14011000+2*0x8
+#14011010 00000000`13f94067 00000000`14585067
+#14011020 00000000`00000000 00000000`00000000
+#14011030 00000000`00000000 00000000`00000000
+#14011040 00000000`00000000 00000000`00000000
+#14011050 00000000`00000000 00000000`00000000
+#14011060 00000000`00000000 00000000`00000000
+#14011070 00000000`00000000 00000000`00000000
+#14011080 00000000`00000000 00000000`00000000
+//PTE
+kd> !dq 13f94000+3*0x8
+#13f94018 80000000`146ad067 80000000`14206025
+#13f94028 00000000`00000000 00000000`00000000
+#13f94038 00000000`00000000 00000000`00000000
+#13f94048 00000000`00000000 00000000`00000000
+#13f94058 00000000`00000000 00000000`00000000
+#13f94068 00000000`00000000 00000000`00000000
+#13f94078 00000000`00000000 80000000`0edeb025
+#13f94088 00000000`0ee08025 ffffffff`00000440
+//addr
+kd> !dq 146ad000+0x18
+#146ad018 00000000`12345678 00000000`00000000
+#146ad028 00000000`00000000 00000000`00000000
+#146ad038 00000000`00000000 00000000`00000000
+#146ad048 00000000`00000000 00000000`00000000
+#146ad058 00000000`00000000 00000000`00000000
+#146ad068 00000000`00000000 00000000`00000000
+#146ad078 00000000`00000000 00000000`00000000
+#146ad088 00000000`00000000 00000000`00000000
+```
+
+具体解释可以看图
+
+![image-20220126222704125](kernel%20lab/image-20220126222704125.png)
+
+这里是如何实现PAE，也就是数据执行保护的呢？
+
+通过看下面这个
+
+```
+kd> !dq 13f94000+3*0x8
+#13f94018 80000000`146ad067 80000000`14206025
+#13f94028 00000000`00000000 00000000`00000000
+#13f94038 00000000`00000000 00000000`00000000
+#13f94048 00000000`00000000 00000000`00000000
+#13f94058 00000000`00000000 00000000`00000000
+#13f94068 00000000`00000000 00000000`00000000
+#13f94078 00000000`00000000 80000000`0edeb025
+#13f94088 00000000`0ee08025 ffffffff`00000440
+```
+
+**PTE在每一页的最高位都置为8，即可开启数据执行保护**
+
+下面我们来验证一下
+
+```
+//切换进程
+kd> .process /i 0x829818c0
+You need to continue execution (press 'g' <enter>) for the context
+to be switched. When the debugger breaks in again, you will be in
+the new process context.
+kd> r cr3
+cr3=00736000
+kd> g
+Break instruction exception - code 80000003 (first chance)
+nt!RtlpBreakWithStatusInstruction:
+80528d2c cc              int     3
+kd> r cr3
+cr3=096101a0
+kd> db 0x403018
+00403018  78 56 34 12 00 00 00 00-00 00 00 00 00 00 00 00  xV4.............
+00403028  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
+00403038  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
+00403048  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
+00403058  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
+00403068  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
+00403078  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
+00403088  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
+kd> !db 146ad000+0x18
+#146ad018 78 56 34 12 00 00 00 00-00 00 00 00 00 00 00 00 xV4.............
+#146ad028 00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00 ................
+#146ad038 00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00 ................
+#146ad048 00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00 ................
+#146ad058 00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00 ................
+#146ad068 00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00 ................
+#146ad078 00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00 ................
+#146ad088 00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00 ...............
+```
+
+我们也可以用vtop来看一下
+
+```
+kd> !vtop 096101a0 0x403018
+X86VtoP: Virt 0000000000403018, pagedir 00000000096101a0
+X86VtoP: PAE PDPE 00000000096101a0 - 0000000014011001
+X86VtoP: PAE PDE 0000000014011010 - 0000000013f94067
+X86VtoP: PAE PTE 0000000013f94018 - 80000000146ad067
+X86VtoP: PAE Mapped phys 00000000146ad018
+Virtual address 403018 translates to physical address 146ad018.
+kd> !dq 00000000146ad018
+#146ad018 00000000`12345678 00000000`00000000
+#146ad028 00000000`00000000 00000000`00000000
+#146ad038 00000000`00000000 00000000`00000000
+#146ad048 00000000`00000000 00000000`00000000
+```
+
+可以看到就是我们查的地址
+
+下面具体来看进程空间
+
+![image-20220126223547297](kernel%20lab/image-20220126223547297.png)
+
+为什么只有PTE和PDE却没有PDPE？
+
+因为太小了，不需要。
+
+一个PTE管理4k页面，一个PDE管理4K*512页面，一个PDPTE管理1G空间
+
+```
+//PTE
+kd> ?? 0xc0000000 + ((0x403018 >> 12) << 3)
+unsigned int 0xc0002018
+kd> dq 0xc0002018
+ReadVirtual: c0002018 not properly sign extended
+c0002018  80000000`146ad067 80000000`14206025
+c0002028  00000000`00000000 00000000`00000000
+c0002038  00000000`00000000 00000000`00000000
+c0002048  00000000`00000000 00000000`00000000
+kd> !dq 13f94018
+#13f94018 80000000`146ad067 80000000`14206025
+#13f94028 00000000`00000000 00000000`00000000
+#13f94038 00000000`00000000 00000000`00000000
+#13f94048 00000000`00000000 00000000`00000000
+//PDE
+kd> ?? 0xc0600000 + ((0x403018 >> 21) << 3)
+unsigned int 0xc0600010
+kd> dq 0xc0600010
+ReadVirtual: c0600010 not properly sign extended
+c0600010  00000000`13f94067 00000000`14585067
+c0600020  00000000`00000000 00000000`00000000
+c0600030  00000000`00000000 00000000`00000000
+kd> !dq 14011010
+#14011010 00000000`13f94067 00000000`14585067
+#14011020 00000000`00000000 00000000`00000000
+#14011030 00000000`00000000 00000000`00000000
+#14011040 00000000`00000000 00000000`00000000
+```
+
+看权限我们是已经改了的，但看不懂为什么上面显示还是不可执行
+
+```
+kd> dq C0002018
+ReadVirtual: c0002018 not properly sign extended
+c0002018  00000000`146ad067 80000000`14206025
+c0002028  00000000`00000000 00000000`00000000
+c0002038  00000000`00000000 00000000`00000000
+c0002048  00000000`00000000 00000000`00000000
+c0002058  00000000`00000000 00000000`00000000
+c0002068  00000000`00000000 00000000`00000000
+c0002078  00000000`00000000 80000000`0edeb025
+c0002088  00000000`0ee08025 ffffffff`00000440
+kd> !pte 0x403018
+                    VA 00403018
+PDE at C0600010            PTE at C0002018
+contains 0000000013F94067  contains 80000000146AD067	 ???明明上面内存都修改了
+pfn 13f94     ---DA--UWEV  pfn 146ad     ---DA--UW-V
+kd> !pte 0x403018
+                    VA 00403018
+PDE at C0600010            PTE at C0002018
+contains 0000000013F94067  contains 00000000146AD067
+pfn 13f94     ---DA--UWEV  pfn 146ad     ---DA--UWEV
+```
+
+后来发现是windbg是会读取物理内存的PTE内容从而确定是否可以执行。
+
+记一下页表转换公式
+
+```
+#define PTE(x) (DWORD *)(0xc0000000 + ((x >> 12) << 3))
+#define PDE(x) (DWORD *)(0xc0600000 + ((x >> 21) << 3))
+```
+
+
+
+# 0x08 lab 08
+
+## 1. goal
+
+1. 修改页表进行零地址读写
+
+
+## 2. step
+
+修改零地址的页表和我们变量地址的页表一样
+
+**（lab8.1.exe）**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+DWORD g_var = 0x12345678;
+DWORD g_out;
+void __declspec(naked) idtEntry()
+{
+
+	PTE(0)[0] = PTE(0x403018)[0];
+	PTE(0)[1] = PTE(0x403018)[1];
+	__asm {
+		mov eax,cr3
+		mov cr3,eax
+	}
+	g_out = *((DWORD*)0x18);
+	*(DWORD*)0x18 = 0xBBBBBBBB;
+	__asm {
+		iretd
+	}
+	
+}
+//0x8003f330
+
+void go()
+{
+	__asm int 0x20;
+}
+
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	g_var = 0x12345678;
+	go();
+	
+	printf("[+] The var is:%p\n", g_var);
+	printf("[+] The out is:%p\n", g_out);
+	printf("[+] The var is:%p\n", *(DWORD*)(0x403018));
+	system("pause");
+}
+```
+
+>注意：release版会对变量有一些优化，记得去看反汇编
+>
+>
+
+![image-20220127011415543](kernel%20lab/image-20220127011415543.png)
+
+原本是12345678，映射完之后修改0地址的内容。
+
+# 0x09 lab 09
+
+## 1. goal
+
+1. 两种跨进程访问修改内存
+
+
+## 2. step
+
+我们要实现一个跨进程内存读写。
+
+具体操作如下
+
+1. 打开Notepad，找到文字缓冲区，通过修改cr3寄存器，使我们当前的进程转换到notepad
+2. 对现地址进行修改，其实修改的就是noteoad内存
+
+我们要明确，写到哪和如何写（写到哪，怎么写）？
+
+1. 找Notepad文字缓冲区
+2. 写到公共地址空间
+
+>为什么不能直接在当前进程执行？
+>
+>当修改cr3之后，进程空间已经发生切换，如果我们进行原有程序寻址，其实进行的是notepad寻找，导致寻址空间发生错误。
+
+![image-20220127083442166](kernel%20lab/image-20220127083442166.png)
+
+文字缓冲区是AA6D0
+
+```
+kd> !process 0 0 notepad.exe
+Failed to get VadRoot
+PROCESS 82cd3338  SessionId: 0  Cid: 0114    Peb: 7ffdf000  ParentCid: 0604
+    DirBase: 096103a0  ObjectTable: e18a03d8  HandleCount:  46.
+    Image: notepad.exe
+```
+
+cr3是096103a0
+
+发现直接在该进程地址读写会出现错误
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+void __declspec(naked) idtEntry()
+{
+
+	__asm {
+		mov eax, cr3
+		push eax
+
+		mov eax, 0x096103a0
+		mov cr3, eax
+		push 0x1234
+		pop ecx
+		mov ds:[0xAA6D0], ecx
+		
+		pop eax
+		mov cr3, eax
+
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	__asm int 0x20;
+}
+
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	go();
+	
+	system("pause");
+}
+```
+
+我们可以像构造系统调用表一样，写在gdtr的位置，然后在本地直接调用中断即可。
+
+代码（**lab9.1.exe**）
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+void __declspec(naked) idtEntry()
+{
+
+	__asm {
+		mov eax, cr3
+		push eax
+
+		mov eax, 0x096103a0
+		mov cr3, eax
+		push 0x1234
+		pop ecx
+		mov ds:[0xAA6D0], ecx
+		
+		pop eax
+		mov cr3, eax
+
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	go2();
+	
+	system("pause");
+}
+```
+
+**kernelcode2.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+
+DWORD Target[3] = { 0x8003f180, 0x8003f220, 0x8003f250 };
+int i;
+int flag;
+char* p;
+void ReadMem();
+void AllocMem();
+void SystemCallEntry();
+DWORD* ServiceTable = (DWORD*)0x8003f2a0;
+//0x00401040
+void __declspec(naked) idtEntry()
+{
+	p = (char*)Target[0];
+	for (i = 0; i < 0x80; i++) {
+		*p = ((char *)SystemCallEntry)[i];
+		p++;
+	}
+	p = (char*)Target[1];
+	for (i = 0; i < 0x30; i++) {
+		*p = ((char*)ReadMem)[i];
+		p++;
+	}
+	p = (char*)Target[2];
+	for (i = 0; i < 0x30; i++) {
+		*p = ((char*)AllocMem)[i];
+		p++;
+	}
+	ServiceTable[0] = Target[1];
+	ServiceTable[1] = Target[2];
+	//eq 8003f500 8003ee00`0008f180
+	__asm {
+		mov eax, 0x0008f180
+		mov ds:[0x8003f508], eax
+		mov eax, 0x8003ee00
+		mov ds : [0x8003f508+4] , eax
+		iretd
+	}
+
+
+}
+//0x8003f330
+/*
+eip
+cs
+eflags
+esp
+ss
+*/
+void __declspec(naked) SystemCallEntry()
+{
+	__asm {
+		//push 0x30
+		//pop fs
+		//sti
+
+		//mov ebx, ss:[esp + 0xc]
+		//mov ecx, ds:[ebx + 0x4]
+		//push 0x8003f2a0
+		//pop ebx
+		//mov ebx, ds:[ebx + eax*4]
+		//call ebx
+
+		//cli
+		//push 0x3b
+		//pop fs
+		//iretd
+		mov eax, cr3
+		push eax
+
+		mov eax, 0x096103a0
+		mov cr3, eax
+		push 0x1234
+		pop ecx
+		mov ds : [0xAA6D0] , ecx
+
+		pop eax
+		mov cr3, eax
+
+		iretd
+	}
+}
+
+void __declspec(naked) ReadMem()
+{
+	__asm {
+		mov eax, ds:[ecx]
+		ret
+	}
+}
+//0x8053474A
+//ExAllocatePool(NonPaged, 0x400)
+void __declspec(naked) AllocMem()
+{
+	__asm {
+		push ecx
+		push 0
+		mov eax, 0x8053474A
+		call eax
+		ret
+	}
+}
+//eq 8003f500 0040ee00`00081040
+void go()
+{
+	__asm int 0x20;
+
+}
+
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	go();
+	//printf("[+] The ptr is:%p\n", g_pool);
+	system("pause");
+}
+```
+
+
+
+可以发现地址内容已经修改
+
+![image-20220127084806077](kernel%20lab/image-20220127084806077.png)
+
+----
+
+平行进程
+
+通过一个进程修改另一个进程，上面我们用到的是写固定内存的数据，这段代码则是跨进程取指令。
+
+具体原理
+
+**每个进程取指令执行都会通过cr3寄存器进行读取基址，如果我们此时修改cr3寄存器为其他进程的基址，然后在指令执行到相应位置填写我们伪造的指令，即可执行我们想要的指令。**
+
+只需要注意构造相应的指令地址即可
+
+**lab9.2.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+DWORD g_cr3, g_num;
+void __declspec(naked) idtEntry()
+{
+
+	__asm {
+		mov eax, cr3
+		mov g_cr3, eax
+		iretd
+		
+		mov eax, 0x12345678
+		
+		//0040104E
+         //这是下一个进程将要执行的位置，执行完之后将会切换cr3寄存器
+		nop
+		nop
+		nop
+		mov eax, 1
+		mov g_num, eax
+
+		mov ecx, 0xaaaaaaaa
+		mov eax, ds : [0x8003f3f0]
+		mov cr3, eax
+
+
+
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	go();
+	while (1) {
+		printf("[+] The cr3 is %p\n", g_cr3);
+		printf("[+] The var is %p\n", g_num);
+		Sleep(1000);
+	}
+	system("pause");
+}
+```
+
+**lab9.3.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+
+	__asm {
+		mov eax, cr3
+		mov ds:[0x8003f3f0], eax
+
+		mov eax, 0x9610400
+		mov cr3, eax
+		//这里由于已经切换cr3，那么下面指令不会执行，只有下一个注释下才会执行
+		nop
+		nop
+		nop
+		mov eax, 0xBBBBBBBB
+		mov eax, 0xBBBBBBBB
+		mov eax, 0xBBBBBBBB
+		mov eax, 0xBBBBBBBB
+		nop
+		//00401066
+		mov g_num, ecx
+
+
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	go();
+	printf("[+] The var is :%p\n", g_num);
+	system("pause");
+}
+```
+
+访问并且修改成功。
+
+![image-20220127140604196](kernel%20lab/image-20220127140604196.png)
+
+# 0x10 lab10
+
+## 1. goal
+
+1. 理解延迟内存分配
+
+
+
+## 2. step
+
+讲一下windows内存分配原理，
+
+windows内存和我们知道的都是延迟内存分配，只有访问时才会真正分配，具体就是页面异常然后在进行页面映射。
+
+我们可以看一个实验
+
+我们分配一个变量是页对齐的，然后在0环里访问它
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+
+DWORD out = 0;
+#pragma section("data_seg", read, write)
+__declspec(allocate("data_seg")) DWORD var = 1;
+
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+
+	__asm {
+		mov eax, var
+		mov out, eax
+
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	system("pause");
+	go();
+	printf("[+] The var is :%p\n", out);
+	system("pause");
+}
+```
+
+然后断下来看pte可以看到页面异常
+
+```
+kd> dq 0x404000
+00404000  ????????`???????? ????????`????????
+00404010  ????????`???????? ????????`????????
+00404020  ????????`???????? ????????`????????
+00404030  ????????`???????? ????????`????????
+00404040  ????????`???????? ????????`????????
+00404050  ????????`???????? ????????`????????
+00404060  ????????`???????? ????????`????????
+00404070  ????????`???????? ????????`????????
+kd> !pte 0x404000
+                    VA 00404000
+PDE at C0600010            PTE at C0002020
+contains 0000000017997067  contains 0000000000000000
+pfn 17997     ---DA--UWEV  not valid
+```
+
+我们继续用CE去读一下
+
+发现此时值已经可以读了，页面也可以访问到了
+
+```
+kd> dq 0x404000
+00404000  00000000`00000001 00000000`00000000
+00404010  00000000`00000000 00000000`00000000
+00404020  00000000`00000000 00000000`00000000
+00404030  00000000`00000000 00000000`00000000
+00404040  00000000`00000000 00000000`00000000
+00404050  00000000`00000000 00000000`00000000
+kd> !pte 0x404000
+                    VA 00404000
+PDE at C0600010            PTE at C0002020
+contains 0000000017997067  contains 80000000019DC225
+pfn 17997     ---DA--UWEV  pfn 19dc      C---A--UR-V
+```
+
+![image-20220127144512890](kernel%20lab/image-20220127144512890.png)
+
+还有一个现象，我们也可以来看一下
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+
+DWORD out = 0;
+#pragma section("data_seg", read, write)
+__declspec(allocate("data_seg")) DWORD var = 1;
+
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+
+	__asm {
+		mov eax, var
+		mov out, eax
+
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	//system("pause");
+	//go();
+	void* ptr = malloc(1024 * 1024 * 1024);
+	printf("[+] The var is :%p\n", ptr);
+	system("pause");
+}
+```
+
+当我们用malloc分配内存，然后去访问时，内存使用会4k的增加，其实就是挂载了页面。
+
+![image-20220127145106516](kernel%20lab/image-20220127145106516.png)
+
+# 0x11 lab11
+
+## 1. goal
+
+1. 知道TLB的缓存，刷新，和G位刷新
+2. 明白TLB和流水线之间的关系
+
+
+
+## 2. step
+
+TLB快表的刷新
+
+1. TLB是否有缓存有-->3，没有-->2
+2. 访问cr3---->访问内存PDE和PTE----->PTE和PDE是否合法，不是4，是---->在TLB中缓存物理与虚拟地址映射关系
+3. 尝试访问物理地址，是否发生异常，是-->4，没有结束
+4. 产生0xe异常
+
+我们先来验证一下TLB存在
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+DWORD out = 0;
+#pragma section("data_seg", read, write)
+__declspec(allocate("data_seg")) DWORD page1[1024];
+__declspec(allocate("data_seg")) DWORD page2[1024];
+DWORD old_pte[2];
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+
+	old_pte[0] = PTE(0x405000)[0];
+	old_pte[1] = PTE(0x405000)[1];
+	PTE(0x405000)[0] = PTE(0x404000)[0];
+	PTE(0x405000)[1] = PTE(0x404000)[1];
+	out = page2[0];
+	PTE(0x405000)[0] = old_pte[0];
+	PTE(0x405000)[1] = old_pte[1];
+
+	__asm {
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	page1[0] = 1;
+	page2[0] = 2;
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	//system("pause");
+	go();
+
+	//void* ptr = malloc(1024 * 1024 * 1024);
+	printf("[+] The var is :%p\n", out);
+	system("pause");
+}
+```
+
+>本来我们赋值out就是2，我们打印出来2好像没问题？
+>
+>其实我们是已经修改了page1的PTE表项，那么应该打印出来1才对，但为什么又打印出来2呢？
+>
+>其实就是TLB存在的原因，让虚拟地址和物理地址映射，我们可以直接访问到0x405000的内容。
+>
+>这里重新赋值page2表项是为了防止蓝屏
+
+![image-20220127155347329](kernel%20lab/image-20220127155347329.png)
+
+----
+
+接下来是TLB刷新
+
+**lab10.1.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+DWORD out = 0;
+#pragma section("data_seg", read, write)
+__declspec(allocate("data_seg")) DWORD page1[1024];
+__declspec(allocate("data_seg")) DWORD page2[1024];
+DWORD old_pte[2];
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+
+	old_pte[0] = PTE(0x405000)[0];
+	old_pte[1] = PTE(0x405000)[1];
+	PTE(0x405000)[0] = PTE(0x404000)[0];
+	PTE(0x405000)[1] = PTE(0x404000)[1];
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+	}
+	out = page2[0];
+	PTE(0x405000)[0] = old_pte[0];
+	PTE(0x405000)[1] = old_pte[1];
+
+	__asm {
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	page1[0] = 1;
+	page2[0] = 2;
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	//system("pause");
+	go();
+
+	//void* ptr = malloc(1024 * 1024 * 1024);
+	printf("[+] The var is :%p\n", out);
+	system("pause");
+}
+```
+
+>```
+>	__asm {
+>		mov eax, cr3
+>		mov cr3, eax
+>	}
+>```
+>
+>是让TLB无效，但不使g属性内容无效
+
+![image-20220127155859013](kernel%20lab/image-20220127155859013.png)
+
+可以看到值变为1和我们预想的一样
+
+---
+
+设置g位（通常内核页面都是有g位的）使TLB刷新无效
+
+具体看注释吧
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+DWORD out = 0;
+#pragma section("data_seg", read, write)
+__declspec(allocate("data_seg")) DWORD page1[1024];
+__declspec(allocate("data_seg")) DWORD page2[1024];
+DWORD old_pte[2];
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+	//存储原有PTE
+	old_pte[0] = PTE(0x405000)[0];		
+	old_pte[1] = PTE(0x405000)[1];
+	//将0x405000PTE改写0x404000
+	PTE(0x405000)[0] = PTE(0x404000)[0]|0x100;
+	PTE(0x405000)[1] = PTE(0x404000)[1];
+	//使TLB无效
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+	}
+	//TLB有效
+	__asm mov eax, ds: [0x405000] ;
+	//将0x405000PTE恢复
+	PTE(0x405000)[0] = old_pte[0];
+	PTE(0x405000)[1] = old_pte[1];
+	//使TLB无效
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+	}
+	//此时应该显示是1
+	//若PTE不设置G位那么应该是2
+	out = page2[0];
+
+	__asm {
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	page1[0] = 1;
+	page2[0] = 2;
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	//system("pause");
+	go();
+
+	//void* ptr = malloc(1024 * 1024 * 1024);
+	printf("[+] The var is :%p\n", out);
+	system("pause");
+}
+```
+
+![image-20220127161650987](kernel%20lab/image-20220127161650987.png)
+
+那么有什么方法能够使g位无效并且刷新TLB表呢？
+
+有一个汇编指令
+
+```
+__asm invlpg ds:[0x405000]
+```
+
+结果就是2
+
+**lab10.2.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+DWORD out = 0;
+#pragma section("data_seg", read, write)
+__declspec(allocate("data_seg")) DWORD page1[1024];
+__declspec(allocate("data_seg")) DWORD page2[1024];
+DWORD old_pte[2];
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+	//存储原有PTE
+	old_pte[0] = PTE(0x405000)[0];		
+	old_pte[1] = PTE(0x405000)[1];
+	//将0x405000PTE改写0x404000
+	PTE(0x405000)[0] = PTE(0x404000)[0]|0x100;
+	PTE(0x405000)[1] = PTE(0x404000)[1];
+	//使TLB无效
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+	}
+	//TLB有效
+	__asm mov eax, ds: [0x405000] ;
+	//将0x405000PTE恢复
+	PTE(0x405000)[0] = old_pte[0];
+	PTE(0x405000)[1] = old_pte[1];
+	//使TLB无效
+	//__asm {
+	//	mov eax, cr3
+	//	mov cr3, eax
+	//}
+	__asm invlpg ds:[0x405000]
+
+	out = page2[0];
+
+	__asm {
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	page1[0] = 1;
+	page2[0] = 2;
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	//system("pause");
+	go();
+
+	//void* ptr = malloc(1024 * 1024 * 1024);
+	printf("[+] The var is :%p\n", out);
+	system("pause");
+}
+```
+
+![image-20220127161950331](kernel%20lab/image-20220127161950331.png)
+
+自我理解：
+
+TLB主要是为了加快内存读取速度，减少四级页表带来的影响。
+
+但同时对我们攻击者来说就需要考虑TLB的影响，
+
+1. 要考虑内存是否在TLB中，如果在，我们是否可以刷新TLB表进而修改页面权限
+2. 如果不在，就要考虑是否会进入TLB表，以及是否有G位，我们是不是可以利用上面那条指令使其在TLB无效
+
+----
+
+接下来看一个神奇的现象
+
+总共有三个
+
+先看第一个
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+DWORD out = 0;
+#pragma section("data_seg", read, write)
+__declspec(allocate("data_seg")) DWORD page1[1024];
+__declspec(allocate("data_seg")) DWORD page2[1024];
+DWORD old_pte[2];
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+	//存储原有PTE
+	old_pte[0] = PTE(0x405000)[0];		
+	old_pte[1] = PTE(0x405000)[1];
+	//使TLB无效
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+	}
+	//TLB有效
+	__asm mov eax, ds: [0x405000] ;
+	//将0x405000PTE改写0x404000
+	PTE(0x405000)[0] = PTE(0x404000)[0];
+	PTE(0x405000)[1] = PTE(0x404000)[1];
+
+	__asm {
+		mov eax, ds:[0x405000]
+		mov out, eax
+	}
+
+	//将0x405000PTE恢复
+	PTE(0x405000)[0] = old_pte[0];
+	PTE(0x405000)[1] = old_pte[1];
+
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	page1[0] = 0xc3;
+	page2[0] = 0xc390;
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	//system("pause");
+	
+	for (int i = 0; i < 500000; i++) {
+
+		go();
+		if (out != 0xc390) {
+			printf("[+] The var is %p\n", out);
+		}
+	}
+			
+	//void* ptr = malloc(1024 * 1024 * 1024);
+	system("pause");
+}
+```
+
+本来我们放的就是0x405000的东西，但为什么打印出来0xc3呢？
+
+首先可以确定0x405000表项PTE绝对被修改了，那为什么会导致出现0xc3这种情况呢？
+
+其实就是在修改之后，下一条指令执行期间，TLB重新刷新导致TLB表中PTE重新被修改
+
+![image-20220127170151920](kernel%20lab/image-20220127170151920.png)
+
+看下一个
+
+我直接没看懂我调的什么东西
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+DWORD out = 0;
+#pragma section("data_seg", read, write)
+__declspec(allocate("data_seg")) DWORD page1[1024];
+__declspec(allocate("data_seg")) DWORD page2[1024];
+DWORD old_pte[2];
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+	//存储原有PTE
+	old_pte[0] = PTE(0x405000)[0];		
+	old_pte[1] = PTE(0x405000)[1];
+	//使TLB无效
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+	}
+	//将0x405000PTE改写0x404000
+	PTE(0x405000)[0] = PTE(0x404000)[0];
+	PTE(0x405000)[1] = PTE(0x404000)[1];
+	__asm int 3;
+	__asm {
+		mov eax, ds:[0x405000]
+		mov out, eax
+	}
+
+	//将0x405000PTE恢复
+	PTE(0x405000)[0] = old_pte[0];
+	PTE(0x405000)[1] = old_pte[1];
+
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	page1[0] = 0xc3;
+	page2[0] = 0xc390;
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	//system("pause");
+	
+
+		go();
+		if (out != 0xc3) {
+			printf("[+] The var is %p\n", out);
+		}
+			
+	//void* ptr = malloc(1024 * 1024 * 1024);
+	system("pause");
+}
+```
+
+>按理来说，我们没访问过0x405000，说明TLB中没有0x405000，当改变其PTE表项时，访问的也是0x404000，windbg显示的也是c3，
+>
+>但打印出来确实c390，
+>
+>现在还无法解释这个问题，需要后续深入学习
+>
+>先说原理
+>
+>1. **我们没有访问过0x405000这块内存，所以就不应该被加载在TLB表项里**
+>2. **下一次访问0x405000时，由于我们已经修改了PTE表项，应该读取的就是0x404000的内容。**
+>
+>但莫名奇妙出现了这种东西
+
+```
+kd> dq 00403378
+00403378  1bf62067`000000c3 00000000`80000000
+00403388  00000000`00000024 00000000`00000000
+```
+
+![image-20220127172435355](kernel%20lab/image-20220127172435355.png)
+
+最后一个现象，
+
+当我们把数据改成代码，具体操作就是执行一下，编译器会自动将数据附上可执行属性
+
+```
+	((void(*)())(DWORD)page1)();
+	((void(*)())(DWORD)page2)();
+```
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+DWORD out = 0;
+#pragma section("data_seg", read, write)
+__declspec(allocate("data_seg")) DWORD page1[1024];
+__declspec(allocate("data_seg")) DWORD page2[1024];
+DWORD old_pte[2];
+DWORD g_num;
+void __declspec(naked) idtEntry()
+{
+	//存储原有PTE
+	old_pte[0] = PTE(0x405000)[0];		
+	old_pte[1] = PTE(0x405000)[1];
+	//使TLB无效
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+	}
+	//将0x405000PTE改写0x404000
+	PTE(0x405000)[0] = PTE(0x404000)[0];
+	PTE(0x405000)[1] = PTE(0x404000)[1];
+	__asm {
+		mov eax, ds:[0x405000]
+		mov out, eax
+	}
+
+	//将0x405000PTE恢复
+	PTE(0x405000)[0] = old_pte[0];
+	PTE(0x405000)[1] = old_pte[1];
+
+	__asm {
+		mov eax, cr3
+		mov cr3, eax
+		iretd
+	}
+
+}
+//0x8003f330
+
+void go()
+{
+	page1[0] = 0xc3;
+	page2[0] = 0xc390;
+	((void(*)())(DWORD)page1)();
+	((void(*)())(DWORD)page2)();
+	__asm int 0x20;
+}
+
+void go2()
+{
+	__asm int 0x21;
+}
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	//system("pause");
+	
+	for (int i = 0; i < 10000; i++) {
+		go();
+		if (out != 0xc3) {
+			printf("[+] The var is %p\n", out);
+		}
+	}
+			
+	//void* ptr = malloc(1024 * 1024 * 1024);
+	system("pause");
+}
+```
+
+>淦，很神奇，这个又恢复了
+>
+>按理说第三个实验是在第二个实验的基础上做的，应该与第二个实验是相反的才对，
+>
+>不清楚什么情况，先放在这里，回来解决
+>
+>这里大佬给出的解释是：
+>
+>**流水线，就是预取指令，我们在给0x405000的PTE修改表项时，下一条指令已经预取了，**
+>
+>**由于前面的0x405000的指令已经执行过了，所以会存进去预取范围内**
+>
+>**上一个实验由于0x405000是数据段没有机会进预取指令的范围，所以不会被存进去**
+
+但我这里想的是，可能不管什么属性，只要有可能进入预取指令周期内，那么就会读取。就像我实验二一样，还是有疑问，待解决....
+
+![image-20220127174016264](kernel%20lab/image-20220127174016264.png)
+
+
+
+# 0x12 lab12
+
+## 1. goal
+
+1. hook页面异常中断
+2. 对页面异常能够分析
+
+## 2. step
+
+这个实验我们需要干一件事，就是对页面异常也就是0xe进行hook，然后打印其堆栈信息。
+
+具体操作就是对该函数地址挂钩，然后跳转到gdt表项我们构造指令的位置，具体要实现哪些指令？
+
+我们想要的是堆栈信息，那么我们就应该保存，这里应该保存在内核地址，也是gdt的位置，然后另起一个进程进行读取就可以。
+
+写代码，这里可以复用以前的代码
+
+首先明确我们要hook的函数
+
+```
+.text:80541694                                _KiTrap0E       proc near
+.text:80541694
+.text:80541694                                arg_8           = dword ptr  0Ch
+.text:80541694
+.text:80541694                                ; FUNCTION CHUNK AT .text:805415B1 SIZE 00000036 BYTES
+.text:80541694
+.text:80541694 000 66 C7 44 24 02 00 00                       mov     word ptr [esp+2], 0
+.text:8054169B 000 55                                         push    ebp
+.text:8054169C 004 53                                         push    ebx
+.text:8054169D 008 56                                         push    esi
+.text:8054169E 00C 57                                         push    edi
+.text:8054169F 010 0F A0                                      push    fs
+.text:805416A1 014 BB 30 00 00 00                             mov     ebx, 30h ; '0'
+.text:805416A6 014 66 8E E3                                   mov     fs, bx
+.text:805416A9                                                assume fs:nothing
+.text:805416A9 014 64 8B 1D 00 00 00 00                       mov     ebx, large fs:0
+.text:805416B0 014 53                                         push    ebx
+.text:805416B1 018 83 EC 04                                   sub     esp, 4          ; Integer Subtraction
+.text:805416B4 01C 50                                         push    eax
+.text:805416B5 020 51                                         push    ecx
+.text:805416B6 024 52                                         push    edx
+.text:805416B7 028 1E                                         push    ds
+.text:805416B8 02C 06                                         push    es
+.text:805416B9 030 0F A8                                      push    gs
+.text:805416BB 034 66 B8 23 00                                mov     ax, 23h ; '#'
+.text:805416BF 034 83 EC 30                                   sub     esp, 30h        ; Integer Subtraction
+.text:805416C2 064 66 8E D8                                   mov     ds, ax
+.text:805416C5                                                assume ds:nothing
+.text:805416C5 064 66 8E C0                                   mov     es, ax
+.text:805416C8                                                assume es:nothing
+```
+
+我们要执行一段指令
+
+```
+push 0x8003f120
+ret
+
+硬编码
+0x03f12068
+0xc380
+```
+
+只需要把这个写到函数对应位置就可以
+
+直接看代码吧。
+
+**kernelcode3.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+
+
+#define K_ESP 0x8003f3f4
+#define K_ESP_4 0x8003f3f0
+#define K_TARGET_CR3 0x8003f3ec
+#define K_CR2 0x8003f3e8
+
+//0x00401040
+ULONG32 i;
+char* p;
+void JumpTarget();
+void __declspec(naked) idtEntry()
+{
+	p = (char*)0x8003f120;
+	for (i = 0; i < 0x80; i++) {
+		*p = ((char *)JumpTarget)[i];
+		p++;
+	}
+
+	//eq 8003f500 8003ee00`0008f180
+	__asm {
+		mov eax, 0xffffffff
+		mov ds:[K_TARGET_CR3], eax
+		//取消写保护
+		mov eax, cr0
+		and eax, not 10000h
+		mov cr0, eax
+
+		mov eax, 0x03f12068
+		mov ds:[0x80541694], eax
+		mov ax, 0xc380
+		mov ds:[0x80541694+0x4], ax
+
+		xor eax, eax
+		mov ds:[K_ESP], eax
+		mov ds : [K_CR2] , eax
+		mov ds : [K_ESP_4] , eax
+
+		mov eax, cr0
+		or eax, 10000h
+		mov cr0, eax
+		iretd
+	}
+
+
+}
+//0x8003f330
+/*
+errno
+eip
+cs
+eflags
+esp
+ss
+*/
+void __declspec(naked) JumpTarget() {
+	__asm {
+		push eax
+		mov eax, cr3
+		cmp eax, ds:[K_TARGET_CR3]
+		jnz END
+
+		mov eax, ds:[esp+4]
+		mov ds:[K_ESP], eax
+		mov eax, ds : [esp + 8]
+		mov ds : [K_ESP_4] , eax
+		mov eax, cr2
+		mov ds : [K_CR2] , eax
+
+		END:
+		pop eax
+		mov     word ptr[esp + 2], 0
+		push 0x8054169B
+		ret
+	}
+
+
+
+
+
+}
+
+//eq 8003f500 0040ee00`00081040
+void go()
+{
+	__asm int 0x20;
+
+}
+
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	go();
+	//printf("[+] The ptr is:%p\n", g_pool);
+	system("pause");
+}
+```
+
+![image-20220127233753453](kernel%20lab/image-20220127233753453.png)
+
+```
+kd> u 0x80541694
+80541694 6820f10380      push    8003F120h
+80541699 c3              ret
+8054169a 005553          add     byte ptr [ebp+53h],dl
+8054169d 56              push    esi
+8054169e 57              push    edi
+8054169f 0fa0            push    fs
+805416a1 bb30000000      mov     ebx,30h
+805416a6 668ee3          mov     fs,bx
+kd> u 0x8003F120 l20
+8003f120 50              push    eax
+8003f121 0f20d8          mov     eax,cr3
+8003f124 3e3b05ecf30380  cmp     eax,dword ptr ds:[8003F3ECh]
+8003f12b 751f            jne     8003f14c
+8003f12d 3e8b442404      mov     eax,dword ptr ds:[esp+4]
+8003f132 3ea3f4f30380    mov     dword ptr ds:[8003F3F4h],eax
+8003f138 3e8b442408      mov     eax,dword ptr ds:[esp+8]
+8003f13d 3ea3f0f30380    mov     dword ptr ds:[8003F3F0h],eax
+8003f143 0f20d0          mov     eax,cr2
+8003f146 3ea3e8f30380    mov     dword ptr ds:[8003F3E8h],eax
+8003f14c 58              pop     eax
+8003f14d 66c74424020000  mov     word ptr [esp+2],0
+8003f154 689b165480      push    offset nt!KiTrap0E+0x7 (8054169b)
+8003f159 c3              ret
+```
+
+hook成功
+
+接下来写我们另一个程序
+
+它主要用来读取页面异常的栈帧信息
+
+这里面的栈帧信息
+
+```
+/*
+errno
+eip
+cs
+eflags
+esp
+ss
+*/
+```
+
+我们要读取什么呢？
+
+1. errno可以让我们知道是什么样的页面异常
+
+2. eip可以让我们知道现在堆栈执行在哪里
+
+3. cr2是将页面异常的虚拟地址打印出来
+
+   ```
+   mov ds:[0], eax
+   此时0页面异常cr2就是0
+   如果是指令执行异常，那么eip和cr2是一样的
+   ```
+
+   
+
+   **lab12.1.exe**
+
+   ```c
+   #include<stdio.h>
+   #include<stdlib.h>
+   #include<Windows.h>
+   
+   
+   #define K_ESP 0x8003f3f4
+   #define K_ESP_4 0x8003f3f0
+   #define K_TARGET_CR3 0x8003f3ec
+   #define K_CR2 0x8003f3e8
+   
+   DWORD g_esp;
+   DWORD g_esp_4;
+   DWORD g_cr2;
+   void __declspec(naked) idtEntry()
+   {
+   	__asm {
+   		mov eax, cr3
+   		mov ds:[K_TARGET_CR3], eax
+   
+   		mov eax, ds:[K_ESP]
+   		mov g_esp, eax
+   		mov eax, ds : [K_ESP_4]
+   		mov g_esp_4, eax
+   		mov eax, ds : [K_CR2]
+   		mov g_cr2, eax
+   
+   		xor eax, eax
+   		mov ds:[K_ESP_4], eax
+   		iretd
+   	}
+   
+   }
+   //0x8003f330
+   #pragma code_seg(".my_code") __declspec(allocate(".my_code")) void go();
+   #pragma code_seg(".my_code") __declspec(allocate(".my_code")) void main();
+   void go()
+   {
+   	__asm int 0x20;
+   }
+   
+   void go2()
+   {
+   	__asm int 0x21;
+   }
+   void main()
+   {
+   	if ((DWORD32)idtEntry != 0x00401040) {
+   		printf("wrong, the addr is %p\n", idtEntry);
+   		exit(-1);
+   	}
+   	while (1) {
+   		go();
+   		if (g_esp_4){
+   			printf("[+] The eip:%p\t", g_esp_4);
+   			printf("The errno:%p\t", g_esp);
+   			printf("The cr2:%p\n", g_cr2);
+   		}
+   			
+   
+   	}
+   	//system("pause");
+   			
+   	system("pause");
+   }
+   ```
+
+![image-20220128000203027](kernel%20lab/image-20220128000203027.png)
+
+异常已经打印出来了，我们可以看一下这些异常
+
+异常码
+
+![image-20220128000527050](kernel%20lab/image-20220128000527050.png)
+
+先看第一个
+
+0x402000就是我们设置的main函数的页边界，很好理解，当我们执行main函数时，是缺页的，就会触发异常
+
+**异常码表示用户态取指令异常**
+
+看第二个
+
+**异常码表示用户态取指令异常**，地址看起来像是大地址。
+
+是写控制台，为什么会出现，我们调用这个函数是printf，其实是因为不常用所以不挂在物理页面上。
+
+```
+kd> u 0x7c81bffa
+kernel32!WriteConsoleInternal:
+7c81bffa 68ac000000      push    0ACh
+7c81bfff 68d0c0817c      push    offset kernel32!`string'+0x40 (7c81c0d0)
+7c81c004 e8cd64feff      call    kernel32!_SEH_prolog (7c8024d6)
+7c81c009 a1cc56887c      mov     eax,dword ptr [kernel32!__security_cookie (7c8856cc)]
+7c81c00e 8945e4          mov     dword ptr [ebp-1Ch],eax
+7c81c011 8b750c          mov     esi,dword ptr [ebp+0Ch]
+7c81c014 8b5d14          mov     ebx,dword ptr [ebp+14h]
+7c81c017 64a118000000    mov     eax,dword ptr fs:[00000018h]
+```
+
+---
+
+用CE看一下实验现象
+
+当我们只要用户CE附加进程是会出现下面的页异常
+
+![image-20220128001422837](kernel%20lab/image-20220128001422837.png)
+
+**看起来都是内核地址，很明显是内核读异常**。
+
+第一个我们看一下eip,发现是这个函数
+
+```
+ MiDoPoolCopy(PRKPROCESS PROCESS, int, PRKPROCESS, volatile void *Address, SIZE_T Length, char, int)
+```
+
+为什么会出现这个？
+
+就是复制内存的函数，也就是复制431b28这个地址内存时出现缺页异常
+
+第二个是这个函数
+
+```
+MmProbeAndLockPages(PMDL MemoryDescriptorList, KPROCESSOR_MODE AccessMode, LOCK_OPERATION Operation)
+```
+
+页面探测函数，应该是NtReadProcessMemory里面出现的
+
+**当我们用CE读取不可读内存时，也会发生缺页异常，看起来CE是通过内核函数来读取内存的**
+
+![image-20220128002348642](kernel%20lab/image-20220128002348642.png)
+
+![image-20220128002306001](kernel%20lab/image-20220128002306001.png)
+
+**用CE写0x402000内存时**
+
+![image-20220128002537690](kernel%20lab/image-20220128002537690.png)
+
+会产生用户态写异常
+
+函数是这个
+
+```
+ProbeForWrite(volatile void *Address, SIZE_T Length, ULONG Alignment)
+```
+
+探测是否可写
+
+---
+
+当我们用内核CE又会发生不同现象
+
+**附加进程**
+
+![image-20220128002936971](kernel%20lab/image-20220128002936971.png)
+
+内核读异常，我的理解：CE在我们读取地址时，需要复制一整块内存，但很明显0地址时不存在的，所以异常
+
+```
+memcpy(void *, const void *Src, size_t MaxCount)
+```
+
+**查看内存**
+
+![image-20220128003233757](kernel%20lab/image-20220128003233757.png)
+
+又是内核读异常，但这次cr2成了0x324，这是为什么？
+
+CE高权限用内核读内存，CE应该是挂了零地址页面，修改了它的PTE表项，从而可读，然后复制内存到零地址页面进行读取。
+
+为什么要这样做？可能是为了方便？
+
+# 0x13 lab13
+
+## 1. goal
+
+1. 理解shadowwalker
+
+## 2. step
+
+基于上述实验我们要实现shadowwalker
+
+具体原理是什么呢？
+
+我们由上面可以看到，如果第一次读取0x402000指令时，会造成一次执行指令异常，那么我们就可以接管这个异常，然后把这个页面的PTE表项直接置0，这样我们用调试器看的时候就会发现此处的内存是空的，至于程序如何执行指令，可以直接从ITLB中直接读取。
+
+如果是读写异常，我们可以把他挂载到一个假页面上，从而达到修改内存。
+
+**kernel lab13.1.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+
+
+#define K_ESP 0x8003f3f4
+#define K_ESP_4 0x8003f3f0
+#define K_TARGET_CR3 0x8003f3ec
+#define K_CR2 0x8003f3e8
+#define K_REAL_PTE0 0x8003f3e4
+#define K_REAL_PTE1 0x8003f3e0
+#define K_FAKE_PTE0 0x8003f3dc
+#define K_FAKE_PTE1 0x8003f3d8
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+#pragma section(".mydata", read,write)
+__declspec(allocate(".mydata")) DWORD FAKE_PAGE[1024];
+
+
+DWORD g_esp;
+DWORD g_esp_4;
+DWORD g_cr2;
+void __declspec(naked) idtEntry()
+{
+
+
+	*(DWORD*)K_REAL_PTE0 = PTE(0x402000)[0];
+	*(DWORD*)K_REAL_PTE1 = PTE(0x402000)[1];
+	*(DWORD*)K_FAKE_PTE0 = PTE(0x405000)[0];
+	*(DWORD*)K_FAKE_PTE0 = PTE(0x405000)[1];
+	PTE(0x402000)[0] = PTE(0x402000)[1] = 0;
+	__asm {
+		mov eax, cr3
+		mov ds:[K_TARGET_CR3], eax
+		iretd
+	}
+
+}
+//0x8003f330
+#pragma code_seg(".my_code") __declspec(allocate(".my_code")) void go();
+#pragma code_seg(".my_code") __declspec(allocate(".my_code")) void main();
+void go()
+{
+	__asm int 0x20;
+}
+
+void main()
+{
+
+	__asm {
+		jmp L
+		ret
+	L :
+	}
+	
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	FAKE_PAGE[0] = 0;
+	go();
+	int i = 0;
+	while (1) {	
+		printf("[+] count:%d\n", i++);
+		Sleep(1000);
+	}
+	//system("pause");
+			
+	system("pause");
+}
+```
+
+**kernelcode4.exe**
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<Windows.h>
+
+
+#define K_ESP 0x8003f3f4
+#define K_ESP_4 0x8003f3f0
+#define K_TARGET_CR3 0x8003f3ec
+#define K_CR2 0x8003f3e8
+#define K_REAL_PTE0 0x8003f3e4
+#define K_REAL_PTE1 0x8003f3e0
+#define K_FAKE_PTE0 0x8003f3dc
+#define K_FAKE_PTE1 0x8003f3d8
+#define PTE(x) ((DWORD *)(0xc0000000 + ((x >> 12) << 3)))
+#define PDE(x) ((DWORD *)(0xc0600000 + ((x >> 21) << 3)))
+
+//0x00401040
+ULONG32 i;
+char* p;
+void JumpTarget();
+void __declspec(naked) idtEntry()
+{
+	p = (char*)0x8003f120;
+	for (i = 0; i < 0x100; i++) {
+		*p = ((char *)JumpTarget)[i];
+		p++;
+	}
+
+	//eq 8003f500 8003ee00`0008f180
+	__asm {
+		mov eax, 0xffffffff
+		mov ds:[K_TARGET_CR3], eax
+		//取消写保护
+		mov eax, cr0
+		and eax, not 10000h
+		mov cr0, eax
+
+		mov eax, 0x03f12068
+		mov ds:[0x80541694], eax
+		mov ax, 0xc380
+		mov ds:[0x80541694+0x4], ax
+
+		xor eax, eax
+		mov ds:[K_ESP], eax
+		mov ds : [K_CR2] , eax
+		mov ds : [K_ESP_4] , eax
+
+		mov eax, cr0
+		or eax, 10000h
+		mov cr0, eax
+		iretd
+	}
+
+
+}
+//0x8003f330
+/*
+eip
+cs
+eflags
+esp
+ss
+*/
+void __declspec(naked) JumpTarget() {
+	__asm {
+		//判断对应进程
+		pushad
+		mov eax, cr3
+		cmp eax, ds: [K_TARGET_CR3]
+		jnz PASS
+		//判读是否是0x402000
+		mov eax, cr2
+		shr eax, 0xc
+		cmp eax, 0x402
+		jnz PASS
+
+		//判断是否是执行
+		mov eax, ss : [esp + 0x20]
+		test eax, 0x10
+		jnz EXECU
+		jmp READ_WRITE
+
+		EXECU :
+	}
+	//恢复真实页面
+	PTE(0x402000)[0] = *(DWORD*)K_REAL_PTE0;
+	PTE(0x402000)[1] = *(DWORD*)K_REAL_PTE1;
+	//读取一下指令，放在TLB中
+	__asm {
+		mov eax, 0x00402004
+		call eax
+	}
+	//把页面置为假页面
+	PTE(0x402000)[0] = PTE(0x402000)[1] = 0;
+	__asm {
+		popad
+		add esp, 4
+		iretd
+
+		READ_WRITE :
+	}
+	//将页面挂为假页面
+	PTE(0x402000)[0] = *(DWORD*)K_FAKE_PTE0;
+	PTE(0x402000)[1] = *(DWORD*)K_FAKE_PTE1;
+	//读取到数据TLB中
+	__asm {
+		mov eax, ds:[0x402000]
+	}
+	//置为0
+	PTE(0x402000)[0] = PTE(0x402000)[1] = 0;
+	__asm{
+		popad
+		add esp, 4
+		iretd
+	PASS:
+		popad
+		mov     word ptr[esp + 2], 0
+		push 0x8054169B
+		ret
+	}
+
+
+}
+
+//eq 8003f500 0040ee00`00081040
+void go()
+{
+	__asm int 0x20;
+
+}
+
+void main()
+{
+	if ((DWORD32)idtEntry != 0x00401040) {
+		printf("wrong, the addr is %p\n", idtEntry);
+		exit(-1);
+	}
+	go();
+	//printf("[+] The ptr is:%p\n", g_pool);
+	system("pause");
+}
+```
+
+最终效果
+
+```
+kd> dq 0x402000
+00402000  ????????`???????? ????????`????????
+00402010  ????????`???????? ????????`????????
+00402020  ????????`???????? ????????`????????
+00402030  ????????`???????? ????????`????????
+00402040  ????????`???????? ????????`????????
+00402050  ????????`???????? ????????`????????
+00402060  ????????`???????? ????????`????????
+00402070  ????????`???????? ????????`????????
+```
+
+![image-20220129124216119](kernel%20lab/image-20220129124216119.png)
+
+读写可能有点问题，暂未解决....
+
+
+
+
 
 # some question
 
@@ -2566,4 +4756,21 @@ call eax
 1. 注意三环和零环哪里切换，要注意ret和iretd
 2. 注意内平栈和外平栈
 3. 知道如何用esp来定位参数
+
+## TLB与流水线
+
+第二个实验原理与现象不一致，需要进一步学习
+
+预取指令到底是根据什么来划分的？还是说每一条指令的下一条指令一定会被预取？
+
+
+
+## 自定义段
+
+```
+#pragma section(".mydata", read,write)
+__declspec(allocate(".mydata")) DWORD FAKE_PAGE[1024]
+#pragma code_seg(".my_code") __declspec(allocate(".my_code")) void go();
+#pragma code_seg(".my_code") __declspec(allocate(".my_code")) void main();
+```
 
